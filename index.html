@@ -48,19 +48,9 @@
     input.helper::placeholder { color: #ccc; }
     input.helper.correct   { border-color: #27ae60 !important; background: #eafaf1; color: #27ae60; }
     input.helper.incorrect { border-color: #e74c3c !important; background: #fdedec; color: #e74c3c; }
-    select {
-      padding: 8px 10px; font-size: 0.95rem; border: 1px solid #ddd;
-      border-radius: 6px; background: #fff; color: #2c3e50;
-      outline: none; cursor: pointer; transition: border-color 0.2s;
-    }
-    select:focus { border-color: #3498db; }
-    select.correct   { border-color: #27ae60; background: #eafaf1; }
-    select.incorrect { border-color: #e74c3c; background: #fdedec; }
     .mask-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
     .mask-row label { min-width: 200px; font-size: 0.9rem; color: #555; }
     .mask-row input { flex: 1; }
-    .class-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; margin-bottom: 18px; }
-    .class-row label { min-width: 200px; font-size: 0.9rem; color: #555; }
     .octet-row { display: flex; gap: 8px; margin-top: 6px; }
     .octet-wrap { display: flex; flex-direction: column; align-items: center; flex: 1; }
     .octet-wrap input { width: 100%; text-align: center; }
@@ -114,16 +104,6 @@
     <div class="task-block">
       <div class="ip-line">IP: <span id="ip-display"></span></div>
       <div class="task-line">Deine Aufgabe: Teile das Netzwerk in <span id="segment-count"></span> Segmente</div>
-    </div>
-
-    <div class="class-row">
-      <label>Class</label>
-      <select id="ip-class">
-        <option value="">-- wählen --</option>
-        <option value="A">A</option>
-        <option value="B">B</option>
-        <option value="C">C</option>
-      </select>
     </div>
 
     <div class="mask-row">
@@ -218,10 +198,9 @@ function cidrToMask(cidr) {
   return [0,1,2,3].map(i => { let b=Math.min(8,Math.max(0,cidr-i*8)); return 256-Math.pow(2,8-b); });
 }
 function extraBits(n) { let b=1; while(Math.pow(2,b)<n) b++; return b; }
-function ipClass(o) { return o<128?'A':o<192?'B':'C'; }
 
 function offsetToIP(base, offset) {
-  let a=base[3]+offset;
+  let a = base[3]+offset;
   let o4=a%256; let c=Math.floor(a/256);
   let o3=(base[2]+c)%256; c=Math.floor((base[2]+c)/256);
   let o2=(base[1]+c)%256; c=Math.floor((base[1]+c)/256);
@@ -229,48 +208,91 @@ function offsetToIP(base, offset) {
   return [o1,o2,o3,o4];
 }
 
-const PRIVATE_RANGES = [
-  {base:[10,0,0,0],    cidr:8 },
-  {base:[172,16,0,0],  cidr:16},
-  {base:[172,18,0,0],  cidr:16},
-  {base:[172,20,0,0],  cidr:16},
-  {base:[192,168,0,0], cidr:24},
-  {base:[192,168,1,0], cidr:24},
-  {base:[192,168,10,0],cidr:24}
-];
+function rnd(min, max) { return min + Math.floor(Math.random()*(max-min+1)); }
+
+// Generate a random task with varied CIDR and varied IPs
+// Rules:
+//  - CIDR between 8 and 26 (so subnetting stays within /8 to /29, learnable range)
+//  - The step octet must stay within a single octet (newCidr <= stepOctetIdx*8 + 8)
+//    → keeps the exercise clean: step values are always 0-255
+//  - IP is randomised within private ranges with random host parts zeroed to align with CIDR
+function generateTask() {
+  let task;
+  let tries = 0;
+  do {
+    tries++;
+    const segments = rnd(2, 10);
+    const extra    = extraBits(segments);
+
+    // Pick a CIDR from a broad realistic set: 8, 9..15, 16, 17..23, 24, 25, 26
+    // But ensure stepOctetIdx * 8 + 8 > newCidr (step stays in one octet)
+    // stepOctetIdx = floor(cidr/8)
+    // newCidr = cidr + extra
+    // Condition: newCidr <= (stepOctetIdx+1)*8  →  cidr + extra <= floor(cidr/8)*8 + 8
+    // This is satisfied when extra <= 8 - (cidr % 8)
+    // So: cidr % 8 <= 8 - extra
+    // For extra=1 → cidr%8 <= 7 (always ok)
+    // For extra=2 → cidr%8 <= 6
+    // For extra=3 → cidr%8 <= 5
+    // For extra=4 → cidr%8 <= 4
+
+    const cidr = rnd(8, 26);
+    const stepOctetIdx = Math.floor(cidr/8);
+    const newCidr = cidr + extra;
+
+    // Reject if subnetting spills into next octet
+    if (newCidr > (stepOctetIdx+1)*8) continue;
+    // Reject if newCidr > 30 (would leave < 2 host bits)
+    if (newCidr > 30) continue;
+
+    // Build a random IP aligned to the cidr boundary
+    // Use realistic private-ish ranges
+    const firstOctetOptions = [10, 172, 192];
+    let o1 = firstOctetOptions[rnd(0,2)];
+    let o2, o3, o4;
+
+    if (o1 === 10)  { o2 = rnd(0,9);  o3 = rnd(0,9);  o4 = 0; }
+    if (o1 === 172) { o2 = rnd(16,31); o3 = rnd(0,9);  o4 = 0; }
+    if (o1 === 192) { o2 = 168;        o3 = rnd(0,20); o4 = 0; }
+
+    const ip = [o1, o2, o3, o4];
+
+    // Zero out bits that fall within the host part according to cidr
+    // For simplicity: zero octets beyond stepOctetIdx, keep step octet aligned
+    for (let i = stepOctetIdx; i < 4; i++) ip[i] = 0;
+    // For step octet: align to multiple of stepSize-in-octet
+    const bitsInStepOctet = cidr % 8;
+    if (bitsInStepOctet > 0) {
+      const mask = (0xFF << (8-bitsInStepOctet)) & 0xFF;
+      ip[stepOctetIdx] = ip[stepOctetIdx] & mask;
+    }
+
+    const stepSize    = Math.pow(2, 32-newCidr);
+    const oldMask     = cidrToMask(cidr);
+    const newMask     = cidrToMask(newCidr);
+    let prefixParts   = [];
+    for (let i=0; i<stepOctetIdx; i++) prefixParts.push(ip[i]);
+    const fixedPrefix = prefixParts.length>0 ? prefixParts.join('.')+'.' : '';
+
+    task = { ip, cidr, segments, extra, newCidr, stepSize,
+             stepOctetIdx, oldMask, newMask, fixedPrefix,
+             ipStr: ip.join('.')+'/'+cidr };
+  } while (!task && tries < 200);
+
+  if (task) TASK = task;
+}
 
 let TASK = {};
-
-function generateTask() {
-  const range    = PRIVATE_RANGES[Math.floor(Math.random()*PRIVATE_RANGES.length)];
-  const segments = 2 + Math.floor(Math.random()*9);
-  const ip       = range.base.slice();
-  const cidr     = range.cidr;
-  const extra    = extraBits(segments);
-  const newCidr  = cidr + extra;
-  const stepSize = Math.pow(2, 32-newCidr);
-  const oldMask  = cidrToMask(cidr);
-  const newMask  = cidrToMask(newCidr);
-  const stepOctetIdx = Math.floor(cidr/8);
-  let prefixParts = [];
-  for (let i=0; i<stepOctetIdx; i++) prefixParts.push(ip[i]);
-  const fixedPrefix = prefixParts.length>0 ? prefixParts.join('.')+'.' : '';
-  TASK = { ip, cidr, segments, extra, newCidr, stepSize,
-           stepOctetIdx, oldMask, newMask, fixedPrefix,
-           ipStr: ip.join('.')+'/'+cidr, cls: ipClass(ip[0]) };
-}
 
 function renderTask() {
   const t = TASK;
   document.querySelectorAll('input[type="text"]').forEach(el=>{ el.value=''; el.classList.remove('correct','incorrect'); });
-  document.querySelectorAll('select').forEach(el=>{ el.value=''; el.classList.remove('correct','incorrect'); });
   document.getElementById('feedback').textContent='';
   document.getElementById('feedback').className='feedback';
   document.getElementById('ip-display').textContent      = t.ipStr;
   document.getElementById('segment-count').textContent   = t.segments;
   document.getElementById('seg-num-display').textContent = t.segments;
 
-  // X count matches exactly the number of extra bits
   document.getElementById('bin-col-header').innerHTML =
     '<span style="color:#3498db;font-family:monospace;font-weight:600;">'+t.fixedPrefix+'</span>'
     + 'X'.repeat(t.extra);
@@ -329,20 +351,12 @@ function chk(id, expected) {
   el.classList.toggle('incorrect', !ok);
   return ok;
 }
-function chkSelect(id, expected) {
-  const el = document.getElementById(id);
-  const ok = el.value === expected;
-  el.classList.toggle('correct',   ok);
-  el.classList.toggle('incorrect', !ok);
-  return ok;
-}
 
 function validate() {
   const t = TASK;
   let allOk = true;
-  allOk = chkSelect('ip-class', t.cls)      && allOk;
-  allOk = chk('net-part',       t.cidr)     && allOk;
-  allOk = chk('host-part',      32-t.cidr)  && allOk;
+  allOk = chk('net-part',  t.cidr)    && allOk;
+  allOk = chk('host-part', 32-t.cidr) && allOk;
   t.oldMask.map(dec2bin8).forEach((v,i) => { allOk = chk('mask-old-b'+(i+1), v) && allOk; });
   allOk = chk('mask-old-dec', t.oldMask.join('.')) && allOk;
   allOk = chk('n-bits', t.extra) && allOk;
